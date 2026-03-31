@@ -1,6 +1,8 @@
-# Movie Ticket Booking System
+# Movie Ticket Booking System — Backend API
 
-A production-ready backend REST API for movie ticket booking with concurrency-safe seat reservation.
+A production-ready REST API backend for movie ticket booking with **concurrency-safe seat reservation** using pessimistic locking.
+
+---
 
 ## Tech Stack
 
@@ -9,9 +11,20 @@ A production-ready backend REST API for movie ticket booking with concurrency-sa
 | Language | Java 17 |
 | Framework | Spring Boot 3.2 |
 | Database Access | Spring JDBC (JdbcTemplate) — no ORM |
-| Database | MySQL 8+ |
-| Auth | JWT (jjwt 0.11.5) + Spring Security |
-| Build | Maven |
+| Database | MySQL 8 |
+| Authentication | JWT + Spring Security |
+| Build Tool | Maven |
+
+---
+
+## Features
+
+- JWT-based authentication (register / login)
+- Browse movies and show timings
+- Real-time seat availability
+- **Concurrency-safe booking** — no double booking under concurrent requests
+- Automatic DB schema creation and seed data on startup
+- Consistent JSON response envelope for all endpoints
 
 ---
 
@@ -19,40 +32,30 @@ A production-ready backend REST API for movie ticket booking with concurrency-sa
 
 ```
 src/main/java/com/moviebooking/
-├── MovieTicketBookingApplication.java   # Entry point
 ├── config/
-│   ├── SecurityConfig.java              # Spring Security + JWT filter chain
-│   ├── JwtAuthFilter.java               # Extracts JWT from Authorization header
-│   └── GlobalExceptionHandler.java      # Centralized error responses
+│   ├── SecurityConfig.java          # Spring Security + stateless JWT filter chain
+│   ├── JwtAuthFilter.java           # Extracts and validates JWT from Authorization header
+│   └── GlobalExceptionHandler.java  # Centralized error handling for all controllers
 ├── controller/
-│   ├── AuthController.java              # POST /api/auth/register, /login
-│   ├── MovieController.java             # GET /api/movies, /shows/{movieId}
-│   ├── SeatController.java              # GET /api/seats/{showId}
-│   └── BookingController.java           # POST /api/book, GET /api/booking/{id}
+│   ├── AuthController.java          # POST /api/auth/register, /login, /health
+│   ├── MovieController.java         # GET /api/movies, /shows/{movieId}
+│   ├── SeatController.java          # GET /api/seats/{showId}
+│   └── BookingController.java       # POST /api/book, GET /api/booking/{id}
 ├── service/
-│   ├── AuthService.java                 # Register/login business logic
-│   ├── MovieService.java                # Movie & show queries
-│   ├── SeatService.java                 # Seat availability queries
-│   └── BookingService.java              # Booking + concurrency control
+│   ├── AuthService.java             # Register/login with BCrypt password hashing
+│   ├── MovieService.java            # Movie and show queries
+│   ├── SeatService.java             # Seat availability queries
+│   └── BookingService.java          # Booking with pessimistic locking (SERIALIZABLE)
 ├── dao/
-│   ├── UserDao.java                     # JDBC queries for users table
-│   ├── MovieDao.java                    # JDBC queries for movies table
-│   ├── ShowDao.java                     # JDBC queries for shows table
-│   ├── SeatDao.java                     # JDBC queries + FOR UPDATE locking
-│   └── BookingDao.java                  # JDBC queries for bookings table
-├── model/
-│   ├── User.java, Movie.java, Show.java
-│   ├── Seat.java, Booking.java
-├── dto/
-│   ├── RegisterRequest.java, LoginRequest.java
-│   ├── BookingRequest.java, ApiResponse.java
+│   ├── UserDao.java                 # JDBC — users table
+│   ├── MovieDao.java                # JDBC — movies table
+│   ├── ShowDao.java                 # JDBC — shows table (with JOIN)
+│   ├── SeatDao.java                 # JDBC — seats table + SELECT FOR UPDATE
+│   └── BookingDao.java              # JDBC — bookings + booking_seats tables
+├── model/                           # Plain Java model classes
+├── dto/                             # Request/Response DTOs with validation
 └── util/
-    └── JwtUtil.java                     # Token generation & validation
-
-src/main/resources/
-├── application.properties               # DB config, JWT secret, port
-├── schema.sql                           # Auto-runs on startup: CREATE TABLE statements
-└── data.sql                             # Seed data: movies, shows, seats
+    └── JwtUtil.java                 # Token generation and validation (jjwt)
 ```
 
 ---
@@ -64,40 +67,41 @@ users          → id, name, email, password
 movies         → id, title, duration, genre, description
 screens        → id, name, total_seats
 shows          → id, movie_id, screen_id, show_time, price
-seats          → id, show_id, seat_number, status (AVAILABLE/LOCKED/BOOKED), locked_at
+seats          → id, show_id, seat_number, status (AVAILABLE/LOCKED/BOOKED)
 bookings       → id, user_id, show_id, total_amount, status
-booking_seats  → booking_id, seat_id  (junction table)
+booking_seats  → booking_id, seat_id
 ```
 
 ---
 
-## How Concurrency Control Works
+## Concurrency Control — Pessimistic Locking
 
-This is the most critical part of the system. Two users trying to book the same seat simultaneously is handled via **Pessimistic Locking**:
+The critical section of the booking flow uses `SELECT ... FOR UPDATE` inside a `SERIALIZABLE` transaction to prevent double booking:
 
-```
-User A                          User B
-  |                               |
-  | BEGIN TRANSACTION             |
-  |                               | BEGIN TRANSACTION
-  | SELECT * FROM seats           |
-  | WHERE id IN (1,2)             |
-  | AND status='AVAILABLE'        |
-  | FOR UPDATE  ← acquires lock  |
-  |                               | SELECT * FROM seats
-  |                               | WHERE id IN (1,2)
-  |                               | FOR UPDATE  ← WAITS (blocked by User A)
-  | UPDATE seats SET status=BOOKED|
-  | INSERT INTO bookings ...      |
-  | COMMIT  → lock released       |
-  |                               | ← unblocked, but seats no longer AVAILABLE
-  |                               | → throws "Seats no longer available" error
-  |                               | ROLLBACK
+```java
+// BookingService.java
+@Transactional(isolation = Isolation.SERIALIZABLE)
+public Booking bookSeats(Long userId, BookingRequest request) {
+    // Acquires row-level locks — concurrent requests block here
+    List<Seat> availableSeats = seatDao.lockSeatsForUpdate(request.getSeatIds());
+
+    if (availableSeats.size() != request.getSeatIds().size()) {
+        throw new IllegalStateException("Seats are no longer available");
+    }
+
+    seatDao.updateSeatsStatus(request.getSeatIds(), "BOOKED");
+    // create booking record...
+}
 ```
 
-**Transaction isolation**: `SERIALIZABLE` — strongest guarantee, prevents phantom reads.
+```sql
+-- SeatDao.java — locks rows until transaction commits
+SELECT * FROM seats
+WHERE id IN (?, ?) AND status = 'AVAILABLE'
+FOR UPDATE;
+```
 
-**Code location**: [BookingService.java](src/main/java/com/moviebooking/service/BookingService.java) → `bookSeats()` method, and [SeatDao.java](src/main/java/com/moviebooking/dao/SeatDao.java) → `lockSeatsForUpdate()` method.
+**Result:** Two users booking the same seat simultaneously → one succeeds, the other gets a `409 Conflict` with a clear error message. No data corruption possible.
 
 ---
 
@@ -108,142 +112,78 @@ User A                          User B
 - Maven 3.8+
 - MySQL 8+
 
-### 1. Configure Database
-
-```properties
-# src/main/resources/application.properties
-spring.datasource.url=jdbc:mysql://localhost:3306/movie_booking_db?...
-spring.datasource.username=root
-spring.datasource.password=root     # ← change to your MySQL password
-```
-
-### 2. Create MySQL Database
+### 1. Create the database
 
 ```sql
 CREATE DATABASE movie_booking_db;
 ```
 
-The schema and seed data auto-run on startup via `schema.sql` and `data.sql`.
+### 2. Configure credentials
 
-### 3. Build & Run
+Edit `src/main/resources/application.properties`:
 
-```bash
-mvn clean package
-java -jar target/movie-ticket-booking-1.0.0.jar
+```properties
+spring.datasource.username=root
+spring.datasource.password=your_password
 ```
 
-Or run directly:
+### 3. Run
 
 ```bash
 mvn spring-boot:run
 ```
 
-Server starts at: `http://localhost:8080`
+Schema and seed data (3 movies, 4 shows, seats) are created automatically on first startup.
+
+Server: `http://localhost:8080`
 
 ---
 
 ## API Reference
 
-All protected endpoints require header: `Authorization: Bearer <token>`
+All endpoints except `/api/auth/**` require: `Authorization: Bearer <token>`
 
-### Auth
+### Authentication
+| Method | Endpoint | Body |
+|--------|----------|------|
+| POST | `/api/auth/register` | `{ name, email, password }` |
+| POST | `/api/auth/login` | `{ email, password }` |
 
-| Method | URL | Body | Auth Required |
-|--------|-----|------|--------------|
-| POST | `/api/auth/register` | `{name, email, password}` | No |
-| POST | `/api/auth/login` | `{email, password}` | No |
-
-### Movies
-
-| Method | URL | Auth Required |
-|--------|-----|--------------|
-| GET | `/api/movies` | Yes |
-| GET | `/api/shows/{movieId}` | Yes |
+### Movies & Shows
+| Method | Endpoint |
+|--------|----------|
+| GET | `/api/movies` |
+| GET | `/api/shows/{movieId}` |
 
 ### Seats
-
-| Method | URL | Auth Required |
-|--------|-----|--------------|
-| GET | `/api/seats/{showId}` | Yes |
+| Method | Endpoint |
+|--------|----------|
+| GET | `/api/seats/{showId}` |
 
 ### Booking
-
-| Method | URL | Body | Auth Required |
-|--------|-----|------|--------------|
-| POST | `/api/book` | `{showId, seatIds: [1,2]}` | Yes |
-| GET | `/api/booking/{id}` | — | Yes |
-| GET | `/api/bookings/my` | — | Yes |
-
----
-
-## Example API Flow (Postman)
-
-### Step 1 — Register
-```json
-POST /api/auth/register
-{
-  "name": "John Doe",
-  "email": "john@example.com",
-  "password": "secret123"
-}
-```
-Response includes `token` → copy it.
-
-### Step 2 — Browse movies
-```
-GET /api/movies
-Authorization: Bearer <token>
-```
-
-### Step 3 — Check shows for a movie
-```
-GET /api/shows/1
-Authorization: Bearer <token>
-```
-
-### Step 4 — Check available seats
-```
-GET /api/seats/1
-Authorization: Bearer <token>
-```
-Note seat IDs with `status: "AVAILABLE"`.
-
-### Step 5 — Book seats
-```json
-POST /api/book
-Authorization: Bearer <token>
-{
-  "showId": 1,
-  "seatIds": [1, 2]
-}
-```
-Response includes `bookingId`.
-
-### Step 6 — Get booking details
-```
-GET /api/booking/1
-Authorization: Bearer <token>
-```
+| Method | Endpoint | Body |
+|--------|----------|------|
+| POST | `/api/book` | `{ showId, seatIds: [1, 2] }` |
+| GET | `/api/booking/{id}` | — |
+| GET | `/api/bookings/my` | — |
 
 ---
 
 ## Response Format
 
-All endpoints return a consistent envelope:
+All responses follow a consistent envelope:
 
 ```json
 {
   "success": true,
   "message": "Booking confirmed",
-  "data": { ... }
-}
-```
-
-On error:
-```json
-{
-  "success": false,
-  "message": "Seats are no longer available: [3]. Please select different seats.",
-  "data": null
+  "data": {
+    "id": 1,
+    "movieTitle": "Inception",
+    "showTime": "2026-04-01T10:00:00",
+    "seatNumbers": ["A1", "A2"],
+    "totalAmount": 300.00,
+    "status": "CONFIRMED"
+  }
 }
 ```
