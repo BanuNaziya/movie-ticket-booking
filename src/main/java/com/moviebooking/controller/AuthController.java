@@ -33,4 +33,9 @@ public class AuthController {
         Map<String, Object> result = authService.login(request);
         return ResponseEntity.ok(ApiResponse.success("Login successful", result));
     }
+
+    @GetMapping("/health")
+    public ResponseEntity<ApiResponse<String>> health() {
+        return ResponseEntity.ok(ApiResponse.success("OK", "Movie Ticket Booking API is running"));
+    }
 }

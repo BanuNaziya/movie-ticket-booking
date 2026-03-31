@@ -4,6 +4,6 @@ buildCommand = "mvn clean package -DskipTests"
 
 [deploy]
 startCommand = "java -jar target/movie-ticket-booking-1.0.0.jar"
-healthcheckPath = "/api/movies"
+healthcheckPath = "/api/auth/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
