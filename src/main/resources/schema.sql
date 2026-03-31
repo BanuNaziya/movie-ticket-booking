@@ -1,6 +1,3 @@
-CREATE DATABASE IF NOT EXISTS movie_booking_db;
-USE movie_booking_db;
-
 CREATE TABLE IF NOT EXISTS users (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
