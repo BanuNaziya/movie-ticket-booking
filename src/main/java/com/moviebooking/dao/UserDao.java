@@ -25,13 +25,18 @@ public class UserDao {
         user.setId(rs.getLong("id"));
         user.setName(rs.getString("name"));
         user.setEmail(rs.getString("email"));
-        user.setPassword(rs.getString("password"));
+        user.setPassword(rs.getString("password")); // stored as BCrypt hash, never plain text
         user.setCreatedAt(rs.getTimestamp("created_at").toLocalDateTime());
         return user;
     };
 
     public Long save(User user) {
         String sql = "INSERT INTO users (name, email, password) VALUES (?, ?, ?)";
+
+        // WHY GeneratedKeyHolder?
+        // After INSERT, we need the auto-generated primary key (id) to return
+        // to the caller (so we can immediately generate a JWT with the userId).
+        // Statement.RETURN_GENERATED_KEYS tells JDBC to capture the DB-generated id.
         KeyHolder keyHolder = new GeneratedKeyHolder();
         jdbcTemplate.update(conn -> {
             PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS);
@@ -43,8 +48,12 @@ public class UserDao {
         return keyHolder.getKey().longValue();
     }
 
+    // Returns Optional<User> instead of User to force callers to handle
+    // the "user not found" case explicitly, preventing NullPointerExceptions.
     public Optional<User> findByEmail(String email) {
         String sql = "SELECT * FROM users WHERE email = ?";
+        // .query() returns a List — .stream().findFirst() converts to Optional safely
+        // even when the query returns 0 rows (unlike queryForObject which throws).
         return jdbcTemplate.query(sql, userRowMapper, email).stream().findFirst();
     }
 
@@ -53,6 +62,9 @@ public class UserDao {
         return jdbcTemplate.query(sql, userRowMapper, id).stream().findFirst();
     }
 
+    // WHY a separate existsByEmail instead of findByEmail + checking Optional?
+    // COUNT(*) is faster — the DB doesn't need to fetch and transfer the full row,
+    // just confirm existence. Also makes the intent of the check explicit.
     public boolean existsByEmail(String email) {
         String sql = "SELECT COUNT(*) FROM users WHERE email = ?";
         Integer count = jdbcTemplate.queryForObject(sql, Integer.class, email);

@@ -25,6 +25,11 @@ public class AuthService {
     }
 
     public Map<String, Object> register(RegisterRequest request) {
+        // Check for duplicate email BEFORE inserting.
+        // WHY not rely on the DB UNIQUE constraint alone?
+        // The DB constraint would also reject duplicates, but it throws a raw
+        // DataIntegrityViolationException which gives a poor error message.
+        // This check lets us return a clean, user-friendly error message.
         if (userDao.existsByEmail(request.getEmail())) {
             throw new IllegalArgumentException("Email already registered");
         }
@@ -32,10 +37,16 @@ public class AuthService {
         User user = new User();
         user.setName(request.getName());
         user.setEmail(request.getEmail());
+        // WHY hash the password before saving?
+        // Never store plain-text passwords. If the DB is compromised, BCrypt hashes
+        // cannot be reversed to recover the original password. BCrypt also adds a
+        // unique salt per password, so identical passwords produce different hashes.
         user.setPassword(passwordEncoder.encode(request.getPassword()));
 
         Long userId = userDao.save(user);
 
+        // Return the JWT immediately after registration so the user doesn't
+        // need to make a separate login request — better UX.
         Map<String, Object> response = new HashMap<>();
         response.put("userId", userId);
         response.put("name", request.getName());
@@ -45,10 +56,19 @@ public class AuthService {
     }
 
     public Map<String, Object> login(LoginRequest request) {
+        // Fetch user by email first, then verify password separately.
         User user = userDao.findByEmail(request.getEmail())
                 .orElseThrow(() -> new IllegalArgumentException("Invalid email or password"));
 
+        // WHY passwordEncoder.matches() instead of direct string comparison?
+        // The stored password is a BCrypt hash. BCrypt is not reversible —
+        // we can't decrypt the hash. Instead, matches() hashes the incoming
+        // plain-text password with the same salt and compares the results.
         if (!passwordEncoder.matches(request.getPassword(), user.getPassword())) {
+            // WHY same error message for both "user not found" and "wrong password"?
+            // Giving different messages (e.g., "user not found" vs "wrong password")
+            // would let attackers enumerate which emails are registered. A single
+            // generic message leaks no information about what failed.
             throw new IllegalArgumentException("Invalid email or password");
         }
 
